@@ -33,23 +33,21 @@ DeepSeek 本体。于是 DeepSeek "看到了"图片，而你只需一个 OpenAI 
 
 ## 安装
 
-### 本机（当前环境，已装好）
-
-插件目录：`/Users/harwiklgg/Desktop/项目/测试/vision-bridge/`（版本 0.2.0），已安装进 web profile 并激活。
-
-### 新机器 / 新的 dsh web 环境
+### 从 GitHub 克隆（推荐）
 
 ```sh
-# 1) 把插件目录复制到新机器（例如 ~/vision-bridge）
-# 2) 一键安装（默认装入 web profile；可用参数指定其他 profile）
-bash install.sh          # 或 bash install.sh headless
+git clone https://github.com/HarwikLGG/dsh-vision-bridge.git ~/vision-bridge
+cd ~/vision-bridge
+bash install.sh          # 默认装入 web profile；其他 profile：bash install.sh headless
 ```
 
-脚本会依次完成：检查 dsh → 准备 pnpm（无 pnpm 时用 corepack 包装）→
+### 一键安装脚本
+
+`install.sh` 会自动完成：检查 dsh → 准备 pnpm（无 pnpm 时用 corepack 包装）→
 `dsh plugin --profile <name> add <插件目录>` 安装并登记 bundle →
 链接运行时依赖（把 profile 的 hoisted node_modules 链接到插件目录）。
 
-或手动安装：
+### 或手动安装
 
 ```sh
 dsh plugin --profile web add /绝对路径/vision-bridge
