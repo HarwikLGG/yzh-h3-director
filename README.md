@@ -33,27 +33,62 @@ DeepSeek 本体。于是 DeepSeek "看到了"图片，而你只需一个 OpenAI 
 
 ## 安装
 
-### 从 GitHub 克隆（推荐）
+**前置要求**：Node.js ≥ 20（自带 corepack）、已安装 dsh（`npm install -g @deepseek-ai/dsh`）。
 
-```sh
-git clone https://github.com/HarwikLGG/dsh-vision-bridge.git ~/vision-bridge
-cd ~/vision-bridge
-bash install.sh          # 默认装入 web profile；其他 profile：bash install.sh headless
+### Windows（PowerShell）
+
+```powershell
+# 1) 克隆插件（或手动复制文件夹）
+git clone https://github.com/HarwikLGG/dsh-vision-bridge.git C:\vision-bridge
+
+# 2) 一键安装（默认装入 web profile；其他 profile 加 -Profile headless）
+cd C:\vision-bridge
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-### 一键安装脚本
+脚本自动完成：检查 dsh → 准备 pnpm（无 pnpm 时用 corepack 包装）→
+`dsh plugin --profile web add` 安装并登记 bundle →
+**Junction** 链接运行时依赖（无需管理员权限）。
 
-`install.sh` 会自动完成：检查 dsh → 准备 pnpm（无 pnpm 时用 corepack 包装）→
-`dsh plugin --profile <name> add <插件目录>` 安装并登记 bundle →
-链接运行时依赖（把 profile 的 hoisted node_modules 链接到插件目录）。
+配置文件位置：`%USERPROFILE%\.dsh\profiles\web\cordis.patch.yml`
 
-### 或手动安装
+### Linux / macOS（bash）
+
+```sh
+# 1) 克隆插件（或手动复制文件夹）
+git clone https://github.com/HarwikLGG/dsh-vision-bridge.git ~/vision-bridge
+
+# 2) 一键安装（默认装入 web profile；其他 profile：bash install.sh headless）
+cd ~/vision-bridge
+bash install.sh
+```
+
+脚本自动完成：检查 dsh → 准备 pnpm（无 pnpm 时用 corepack 包装）→
+`dsh plugin --profile web add` 安装并登记 bundle →
+符号链接运行时依赖。
+
+配置文件位置：`~/.dsh/profiles/web/cordis.patch.yml`
+
+### 或手动安装（任意平台）
 
 ```sh
 dsh plugin --profile web add /绝对路径/vision-bridge
 # 并把 profile 的 node_modules 链接到插件目录（运行时依赖解析需要）：
-ln -sfn ~/.dsh/profiles/web/node_modules /绝对路径/vision-bridge/node_modules
+#   macOS/Linux:  ln -sfn ~/.dsh/profiles/web/node_modules /绝对路径/vision-bridge/node_modules
+#   Windows:      New-Item -ItemType Junction -Path C:\vision-bridge\node_modules -Target %USERPROFILE%\.dsh\profiles\web\node_modules
 ```
+
+### 大图缩小后端（跨平台）
+
+| 平台 | 缩小后端 | 说明 |
+|---|---|---|
+| Windows | **sharp** | 首选；安装时若未自动装上，手动执行 `cd %USERPROFILE%\.dsh\profiles\web && pnpm install sharp` |
+| Linux | **sharp** | 同上 |
+| macOS | **sharp → sips** | 优先 sharp；缺失时自动回退系统内置 sips，零依赖 |
+
+> 大图（超过 `maxVisionPixels`）会先缩小到长边 `visionMaxDimension`（默认 4096）
+> 再发送，避免 vLLM / LM Studio 对超大像素图报 500。两个后端都不可用时插件会
+> 记录警告并按原图发送（此时超大图可能被视觉服务端拒绝）。
 
 装完后**重启 `dsh web`** 生效（宿主侧插件需要重启加载）。
 
@@ -75,7 +110,7 @@ ln -sfn ~/.dsh/profiles/web/node_modules /绝对路径/vision-bridge/node_module
 | `timeoutMs` | `120000` | 单次视觉请求超时（毫秒，大图 + 本地大模型可能较慢） |
 | `maxImageBytes` | `4194304` (4 MiB) | 超过此字节数的图片不识别，替换为占位说明 |
 | `maxVisionPixels` | `16777216` (16.7M ≈ 4096²) | 像素数超过此值的图片先缩小再发送，避免视觉服务端（vLLM 等）对超大图报错 |
-| `visionMaxDimension` | `4096` | 缩小后的长边像素（sips 缩放，保持宽高比，输出 JPEG） |
+| `visionMaxDimension` | `4096` | 缩小后的长边像素（sharp/sips 缩放，保持宽高比，输出 JPEG） |
 | `failOpen` | `false` | 视觉调用失败时：`false` 抛错结束当前 turn（你能看到明确原因）；`true` 用 `[图片识别失败…]` 占位继续 |
 
 ### 常见视觉端点示例

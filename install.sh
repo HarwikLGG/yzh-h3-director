@@ -53,6 +53,19 @@ if [ "$LINKED" = "0" ]; then
   echo "    请手动把 profile 的 node_modules 链接到: $PLUGIN_DIR/node_modules"
 fi
 
+echo "==> 5/5 检查大图缩小后端（sharp / sips）"
+SCALE_OK=0
+if [ -e "$PLUGIN_DIR/node_modules/sharp" ]; then
+  echo "    sharp: ✓ 可用（Windows/Linux/macOS 通用，大图缩小首选）"
+  SCALE_OK=1
+elif command -v sips >/dev/null 2>&1; then
+  echo "    sips: ✓ 可用（仅 macOS 原生，sharp 缺失时兜底）"
+  SCALE_OK=1
+else
+  echo "    ✗ sharp 与 sips 均不可用：大图将不会被缩小，超大图片可能被视觉服务端拒绝。"
+  echo "      请手动安装 sharp：cd \"$DSH_HOME/profiles/$PROFILE\" && pnpm install sharp"
+fi
+
 echo
 echo "=============================================================="
 echo "✅ 安装完成！接下来："

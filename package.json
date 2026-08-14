@@ -26,6 +26,9 @@
     "@deepseek-ai/dsh-settings": ">=0.0.1-rc.3",
     "@deepseek-ai/cordis": ">=4.0.1"
   },
+  "optionalDependencies": {
+    "sharp": ">=0.33.0"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh": ">=0.0.1-rc.1"
   }
