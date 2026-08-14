@@ -126,6 +126,64 @@ dsh plugin --profile web add /绝对路径/vision-bridge
 
 > 只要实现了 OpenAI `chat/completions` 且支持 `image_url`（data URL）的端点都能用。
 
+## 第三方视觉模型设置指南
+
+### 方式一：GUI 设置卡片（推荐，保存即生效，无需重启）
+
+打开 **设置 → 插件 → vision-bridge** 卡片，填三个字段：
+
+1. **`baseURL`** — 第三方平台 OpenAI 兼容端点根地址（见下表，直接复制）
+2. **`model`** — 该平台的视觉模型 id（见下表）
+3. **`apiKeyEnv`** — 给 Key 起个引用名（如 `OPENAI_API_KEY`），然后在同卡片的
+   **Key 输入框里粘贴你的 API Key**（保存到本机凭据服务，不会回显到页面）
+   > 本地端点（LM Studio / Ollama）无需 Key：`apiKeyEnv` 留空即可
+
+点保存 → 下一次发图立即生效。
+
+### 方式二：环境变量（适合服务器/无 GUI 场景）
+
+```sh
+# macOS / Linux
+export OPENAI_API_KEY=sk-xxxx
+dsh web
+
+# Windows PowerShell
+$env:OPENAI_API_KEY = "sk-xxxx"
+dsh web
+```
+
+配置里 `apiKeyEnv` 写同一个名字即可（如 `OPENAI_API_KEY`）。
+
+### 方式三：配置文件（`$DSH_HOME/profiles/web/cordis.patch.yml`）
+
+```yaml
+- id: vision-bridge
+  config:
+    enabled: true
+    apiKeyEnv: OPENAI_API_KEY          # 引用名（环境变量或凭据服务）
+    baseURL: https://api.openai.com/v1
+    model: gpt-4o-mini
+```
+
+改完重启 `dsh web` 生效。
+
+### 主流视觉 API 平台配置速查
+
+| 平台 | baseURL（直接复制） | model 示例 | 获取 API Key |
+|---|---|---|---|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini`、`gpt-4o` | platform.openai.com → API keys |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4v-plus`、`glm-4v-flash` | open.bigmodel.cn → API 密钥 |
+| 阿里百炼（通义） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-vl-max`、`qwen2.5-vl-72b-instruct` | bailian.console.aliyun.com → API-KEY |
+| 硅基流动 | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-VL-72B-Instruct` | cloud.siliconflow.cn → API 密钥 |
+| 月之暗面 | `https://api.moonshot.cn/v1` | `moonshot-v1-8k-vision-preview` | platform.moonshot.cn → API 密钥 |
+| DeepSeek（无视觉，备选） | `https://api.deepseek.com` | — | 仅文本，不适用识图 |
+| 本地 LM Studio（局域网） | `http://<主机IP>:1234/v1` | 本机已加载的视觉模型名 | 无需 Key，`apiKeyEnv` 留空 |
+| 本地 LM Studio（本机） | `http://127.0.0.1:1234/v1` | 本机已加载的视觉模型名 | 无需 Key，`apiKeyEnv` 留空 |
+| Ollama | `http://127.0.0.1:11434/v1` | `llava`、`minicpm-v`、`qwen2.5vl` | 无需 Key，`apiKeyEnv` 留空 |
+
+> **如何确认本地模型是不是视觉模型**：浏览器打开 `http://<主机IP>:1234/v1/models`，
+> 模型 id 通常带 `vl` / `vision` / `text-image` 字样；或直接发一张图试试。
+
 ## 卸载
 
 ```sh
