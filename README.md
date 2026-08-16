@@ -1,24 +1,25 @@
 # dsh-vision-bridge（识图桥接插件）
 
 DeepSeek 本体（`deepseek-official` 适配器）是**纯文本**路由，消息里出现图片会直接报
-`UNSUPPORTED_CONTENT`。本插件在每一步请求组装之前拦截用户消息：把其中的图片交给
-**你指定的视觉 API 模型**识别，拿到文本描述后**原位替换图片块**，再作为普通文本转发给
-DeepSeek 本体。于是 DeepSeek "看到了"图片，而你只需一个 OpenAI 兼容的视觉 API。
+`UNSUPPORTED_CONTENT`。本插件在三个位置拦截图片内容块：把图片交给**你指定的视觉
+API 模型**识别，拿到文本描述后**原位替换图片块**，再作为普通文本转发给 DeepSeek
+本体。于是 DeepSeek "看到了"图片，而你只需一个 OpenAI 兼容的视觉 API。
 
 ## 工作流程
 
 ```
-你在对话框粘贴/上传图片 + 文字
+① 你在对话框粘贴/上传图片 + 文字
         │
         ▼
-① 网关放行：插件包装 ctx.llm.resolveModelInfo，把 "image" 加入模型的
+② 网关放行：插件包装 ctx.llm.resolveModelInfo，把 "image" 加入模型的
   inputModalities，让 session.prompt 不再以 MODEL_DOES_NOT_SUPPORT_IMAGES 拒图
         │
         ▼
-② agent/pre-step 拦截到 image 块
-        │
-        ▼
-③ 调用你配置的视觉模型（chat/completions + image_url data URL，一张图一次请求）
+③ 三个拦截点把 image 块换成文本描述（每个拦截点都走同一套识别逻辑：
+   chat/completions + image_url data URL，一张图一次请求，同图带缓存）：
+   · agent/pre-step        —— 对话框直接发的图片（已领取的 prompt 批次）
+   · tools/post-execute    —— 工具返回的图片（read_image 读截图等）
+   · llm.stream/prepareCall—— 请求兜底：旧会话历史里已持久化的图片
         │
         ▼
 ④ 图片块 → "[图片名 的内容描述（由视觉模型 <model> 生成）]\n<描述文本>"
@@ -27,9 +28,17 @@ DeepSeek 本体。于是 DeepSeek "看到了"图片，而你只需一个 OpenAI 
 ⑤ 纯文本消息继续进入 DeepSeek 请求（描述与你的原文按原位顺序排列）
 ```
 
-> ①是必要的：DeepSeek 适配器声明 `inputModalities: ["text"]`，网关会在图片进入
-> 消息管线之前就拒绝带图 prompt。放行是安全的——④保证真正发给适配器的内容里
+> ②是必要的：DeepSeek 适配器声明 `inputModalities: ["text"]`，网关会在图片进入
+> 消息管线之前就拒绝带图 prompt。放行是安全的——③保证真正发给适配器的内容里
 > 已经没有图片块，适配器自身的 `contentHasImage` 检查不会触发。
+>
+> **为什么需要三个拦截点？** 请求是从整个会话历史（`session.deriveMessages()`）
+> 组装的，`agent/pre-step` 只看到新领取的 prompt 批次。工具结果里的图片块
+> （`read_image` 返回的 `text + image`）不在 pre-step 视野内，会直接进入下一次
+> 请求触发 `UNSUPPORTED_CONTENT`——这就是"插件已接入但一读截图就报错"的根因。
+> `tools/post-execute` 在工具结果**落库之前**转换，描述文本随会话持久化，同一张图
+> 只识别一次；`llm.stream/prepareCall` 兜底处理插件安装前就已持久化在旧会话历史
+> 里的图片（按附件哈希缓存，每进程每图只识别一次），让已"卡死"的会话恢复可用。
 
 ## 安装
 
@@ -184,6 +193,20 @@ dsh web
 > **如何确认本地模型是不是视觉模型**：浏览器打开 `http://<主机IP>:1234/v1/models`，
 > 模型 id 通常带 `vl` / `vision` / `text-image` 字样；或直接发一张图试试。
 
+## 使用技巧（真实使用总结）
+
+- **描述已持久化，追问无需重发图**：图片一旦被识别，描述文本就写进了会话历史。
+  后续"图里有什么颜色""左边那个人在干嘛"这类追问直接发文字即可，不会再次调用视觉 API。
+- **像素级问题让 dsh 直接读原图核实**：插件把图片替换成文字后，**原始图片仍保存在本地附件库**
+  （`$DSH_HOME/attachments/v1/objects/<sha256 前两位>/<sha256>`，按上传时间找最近的文件）。
+  对"精确颜色色值""数一数有几个 X""放大看细节"这类问题，可以让 dsh 用
+  sharp 等工具直接分析原图（如 k-means 聚类取主色），比视觉模型描述更精确。
+- **视觉模型细节可能不准，重要内容建议核实**：小模型对数字、颜色词偶有误读
+  （实测 int4 模型曾把 "9876" 读成 "9370"；"灰绿山峦"在像素上实为灰褐）。
+  代码截图、报错信息等关键文字，建议让 dsh 对照原图复核一遍。
+- **局域网小模型慢**：单张识图实测可达 80s 以上，若频繁超时请把 `timeoutMs`
+  调到 `180000`（3 分钟）以上再试。
+
 ## 卸载
 
 ```sh
@@ -193,6 +216,15 @@ dsh plugin --profile web remove dsh-vision-bridge
 ## 说明与限制
 
 - 一张图一次视觉请求（兼容性最好）；同一消息多张图会按顺序逐张识别，标签带文件名或序号。
-- 转换发生在 `agent/pre-step` 瀑布，替换后的文本会**持久化进会话历史**（历史回放无需再次调用视觉 API）。
+- **同图缓存**：同一附件（按 `attachmentId` 哈希）+ 同一视觉模型，每进程只识别一次；
+  识别结果写入会话历史后，后续请求直接复用历史中的描述文本，不重复调用视觉 API。
+- **主模型原生支持图片时自动休眠**：如果当前路由是 pi-ai 等原生视觉模型
+  （`inputModalities` 含 `image`），`tools/post-execute` 与请求兜底都会原样放行图片，
+  桥接不介入；切回 DeepSeek 后自动恢复转换。
+- 转换发生在 `agent/pre-step`（对话框图片）、`tools/post-execute`（工具结果图片）与
+  `llm.stream`/`prepareCall`（旧会话历史图片兜底）三处；前两处替换后的文本会
+  **持久化进会话历史**（历史回放无需再次调用视觉 API）。
+- 工具结果图片识别失败时：`failOpen=false` 会把该工具结果标记为错误（模型能看到
+  `vision-bridge: …` 失败原因并自行处理），`failOpen=true` 用占位文本继续。
 - 视觉调用计入 turn 时长：识别期间 turn 处于 running 状态，UI 会显示进行中。
 - 本插件不依赖任何客户端改动：浏览器侧粘贴/上传图片的既有流程原样工作。

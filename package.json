@@ -1,7 +1,7 @@
 {
   "name": "dsh-vision-bridge",
-  "version": "0.2.0",
-  "description": "识图桥接插件：把用户消息里的图片交给用户指定的视觉 API 模型识别（自动缩小大图、逐字转录文字、多图序号上下文），将文本描述转发给 DeepSeek 本体。",
+  "version": "0.2.1",
+  "description": "识图桥接插件：把用户消息、工具结果与会话历史里的图片交给用户指定的视觉 API 模型识别（自动缩小大图、逐字转录文字、多图序号上下文、同图缓存），将文本描述转发给 DeepSeek 本体。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
