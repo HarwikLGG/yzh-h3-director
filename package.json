@@ -1,35 +1,27 @@
 {
-  "name": "dsh-vision-bridge",
-  "version": "0.2.1",
-  "description": "识图桥接插件：把用户消息、工具结果与会话历史里的图片交给用户指定的视觉 API 模型识别（自动缩小大图、逐字转录文字、多图序号上下文、同图缓存），将文本描述转发给 DeepSeek 本体。",
+  "name": "@dsh-external/yzh-h3-director",
+  "version": "0.0.1",
+  "description": "妖猪猪H3导演插件: 内嵌连续剧情导演版提示词(官方六字段), 自动联网检索角色/设定(Scrapling优先), 供对话推理模型两轮打磨后严格输出连续剧情提示词",
+  "private": true,
   "type": "module",
-  "main": "lib/index.js",
-  "exports": {
-    ".": "./lib/index.js",
-    "./package.json": "./package.json"
-  },
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
   "files": [
-    "lib/index.js",
-    "cordis.patch.yml",
-    "README.md"
+    "lib"
   ],
-  "license": "MIT",
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    }
-  },
-  "dependencies": {
-    "@deepseek-ai/schemastery": ">=3.18.0",
-    "@deepseek-ai/dsh-credentials": ">=0.0.1-rc.3",
-    "@deepseek-ai/dsh-launch-environment": ">=0.0.1-rc.3",
-    "@deepseek-ai/dsh-settings": ">=0.0.1-rc.3",
-    "@deepseek-ai/cordis": ">=4.0.1"
-  },
-  "optionalDependencies": {
-    "sharp": ">=0.33.0"
-  },
+  "license": "BSD-3-Clause",
   "peerDependencies": {
-    "@deepseek-ai/dsh": ">=0.0.1-rc.1"
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
+    "@deepseek-ai/cordis": ">=4.0.1 <5",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }
