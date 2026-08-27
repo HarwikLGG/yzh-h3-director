@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/yzh-h3-director",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "妖猪猪H3导演插件: 内嵌连续剧情导演版提示词(官方六字段), 自动联网检索角色/设定(Scrapling优先), 供对话推理模型两轮打磨后严格输出连续剧情提示词",
   "private": true,
   "type": "module",
