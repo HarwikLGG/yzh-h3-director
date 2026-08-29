@@ -320,6 +320,9 @@ export function apply(ctx: Context, config: Config): void {
         `- 每个 Segment 的 subject_definitions 必须包含本段真正需要的：公共人物 <Subject N>、本段场景/道具 Picture、当前 <Audio N>（如实际提供）。\n` +
         `- 导演台连续生成：不使用 <Video N>、不使用 [video continuation]；每个 Segment 一律 [reference generation]；从上一段最后一帧直接继续，禁止动作倒带、禁止恢复默认状态、禁止黑场/淡出（非最终段）、禁止无理由瞬移。\n` +
         `- 字段标题严格用官方英文：subject_definitions: / summary: / retention_analysis: / detailed_description: / overall_soundscape: / non_diegetic_music:；正文用简体中文；技术标签保持英文（<Subject N>、<Picture N>、fully_preserved、[Shot N] At 00:00.000、[reference generation]、<d>[Chinese] ……</d>）。\n` +
+        `- 【对白格式（硬性）】所有人物对白必须以 <d>[中文]……</d> 标签包裹（英文对白用 <d>[English]……</d>）；任何人物的对白必须同时提供①说话人标识 <Subject N> (SN) ②英文声音表演指导（vocal direction：音量、音色、音域、节奏、气息、情绪语气、必须避免的念法，用完整英文描述句）③<d>标签内的中文对白原文。\n` +
+        `  正确范例：<Subject 1> (S1) 声音沉稳克制：and a slight chest undertone; low in volume, clearly articulated, cut in short phrases, with restrained impatience and pauses at sentence endings. Avoid a cute voice, domineering breathiness, announcer delivery, false maturity, or cartoon exaggeration. Do not play the line as narration: it is a controlled command directed at her. The volume dips slightly on“三个愿望” and the ending closes without a flourish.\n<d>[中文]女人，把领队带回家，可以实现你三个愿望。</d>\n  禁止把对白写成一串引号包裹的中文台词（如 女客"……"）；禁止把英文声音指导改成中文；禁止缺省 <d> 标签。\n` +
+        `- 对白只出现在 detailed_description 内；尽量给每个主要角色固定 Speaker ID（首现即标注 <Subject N> (SN)），后续一致。\n` +
         `- 字段名不得翻译/改写，字段顺序不得改变；不得伪造 <Picture N>（场景无参考图时自然语言描述）。\n` +
         `- 非最终 Segment 必须留下清晰动作接口帧（运动矢量+朝向+道具位置），最终段才允许完整收束。\n` +
         `- 【稳定复现·绝对空间】全片必须建立两份一次性公共资产：①【世界坐标系】——以"东西南北罗盘 + 房间固定锚点(A/B/C…)"定义场景四向布局与关键位置，全片不变量；②【机位登记表】——为每个用过的机位命名（CAM-A/B/C…），写清绝对位置、朝向、高度、俯仰与默认景别，后续镜头只引用名字。所有方位描述只用罗盘词，禁止"前方/后方/左边/旁边/一侧/前面"等无参照词。\n` +
@@ -339,7 +342,8 @@ export function apply(ctx: Context, config: Config): void {
         `⑤ 其余：再对照「四、六字段格式规范」第五十九节《输出前内部连续性检查》37 项逐项自查（人物资产/时长/首尾接口/状态/空间/场景/声音），并核对格式是否全部符合上述生成要求。\n` +
         `⑥ 肢体：每拍画面的手/腿数量是否可指认到手部职责表；有无第三只手、多余肢体或反射复制（三只手）；特写是否声明了肢体件数上限。\n` +
         `⑦ 位置细节：微动作是否伴随位移；人物有无贴靠墙/窗/镜边界；"看/侧头"指示与光源描述是否自洽（顺光/逆光矛盾会诱发瞬移）；机位是否只引用登记表命名并完成 0.5–2 秒接力。\n` +
-        `发现任何冲突（如 12 秒超时、Picture 遗漏、字段名松动、动作倒带、位置瞬移、镜头跳切、物理不合理、恢复默认状态），必须先自行重新设计对应 Segment，再输出。\n` +
+        `⑧ 对白格式：每句人物对白是否都是「<Subject N> (SN) + 英文声音表演指导 + <d>[中文]……</d>」结构；有无把对白写成中文引号串；Speaker ID 是否全程一致；英文指导是否完整可用（音量/音色/节奏/情绪/避免事项）。\n` +
+        `发现任何冲突（如 12 秒超时、Picture 遗漏、字段名松动、动作倒带、位置瞬移、镜头跳切、物理不合理、恢复默认状态、对白缺失<d>标签），必须先自行重新设计对应 Segment，再输出。\n` +
         `二修轮：修正全部问题后，输出最终版本——只呈现一次完整设计（公共人物绑定: + 各 [Segment N | duration 00:XX.XXX] 六字段），不再保留初审痕迹或检查过程。\n\n` +
         `# 四、六字段格式规范（完整提示词，必须严格遵照）\n\n${H3_PROMPT}`
       )
