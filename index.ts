@@ -1,0 +1,394 @@
+/**
+ * @dsh-external/yzh-h3-director — 妖猪猪H3连续剧情导演插件（工具包形态）。
+ *
+ * 同一套技能、单条流程、零 LLM 调用：
+ *   yzh_h3_director_generate(剧情) →
+ *     ① 自动提取搜索关键词（含剧情专名/地名/主题/风格，支持用户补充）
+ *     ② 联网搜索资料（DDG 主通道 + Bing 兜底，Node fetch 直连，无需 API Key）
+ *     ③ 打包【联网检索资料】+【剧情输入】+【生成要求】+【六字段规范提示词全文】
+ *     ④ 对话推理模型拿到任务包后：分析打磨剧情 → 严格按六字段输出
+ *        （subject_definitions / summary / retention_analysis / detailed_description /
+ *          overall_soundscape / non_diegetic_music）
+ */
+import type { Context } from '@deepseek-ai/cordis'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import z from '@deepseek-ai/schemastery'
+import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { H3_PROMPT } from './prompt.js'
+import { NOVEL_PROMPT } from './novel_prompt.js'
+
+export const name = "@dsh-external/yzh-h3-director"
+export const inject = ['tools']
+
+export interface Config {
+  /** 搜索超时(毫秒) */
+  searchTimeout: number
+  /** 每个关键词最多返回结果数 */
+  maxResults: number
+  /** 最多搜索关键词数 */
+  maxQueries: number
+}
+
+export const Config = z.object({
+  searchTimeout: z.number().default(15000),
+  maxResults: z.number().default(4),
+  maxQueries: z.number().default(5),
+})
+
+// ── 工具内部：HTML 清洗 / 关键词提取 / 搜索 ────────────────────────────────
+function stripHtml(s: string): string {
+  return s
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function decodeDdgUrl(href: string): string {
+  const m = /uddg=([^&]+)/.exec(href)
+  if (!m) return href
+  try { return decodeURIComponent(m[1]) } catch { return href }
+}
+
+interface SearchResult { title: string; url: string; snippet: string }
+
+async function searchDdg(q: string, max: number, timeoutMs: number): Promise<SearchResult[]> {
+  const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q) + '&kl=cn-zh&kp=-1'
+  const res = await fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: 'follow',
+  })
+  const html = await res.text()
+  const out: SearchResult[] = []
+  const blockRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
+  const snipRe = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g
+  const snippets = [...html.matchAll(snipRe)]
+  const blocks = [...html.matchAll(blockRe)]
+  for (let i = 0; i < blocks.length && out.length < max; i++) {
+    const title = stripHtml(blocks[i][2])
+    if (!title) continue
+    const snippet = i < snippets.length ? stripHtml(snippets[i][1]) : ''
+    out.push({ title, url: decodeDdgUrl(blocks[i][1]), snippet: snippet.slice(0, 260) })
+  }
+  return out
+}
+
+async function searchBing(q: string, max: number, timeoutMs: number): Promise<SearchResult[]> {
+  const url = 'https://www.bing.com/search?q=' + encodeURIComponent(q) + '&mkt=zh-CN&count=' + max + '&setlang=zh-hans'
+  const res = await fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: 'follow',
+  })
+  const html = await res.text()
+  const out: SearchResult[] = []
+  // b_algo 块: li class="b_algo" ... <h2 class=""><a ... href=URL>TITLE</a></h2> ... <div class="b_caption"><p ...>SNIPPET</p>
+  const blockRe = /<li class="b_algo"[\s\S]*?<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<div class="b_caption">[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/g
+  let m: RegExpExecArray | null
+  while ((m = blockRe.exec(html)) !== null && out.length < max) {
+    const title = stripHtml(m[2])
+    if (!title) continue
+    out.push({ title, url: m[1], snippet: stripHtml(m[3]).slice(0, 260) })
+  }
+  // 兜底: 无 b_caption 的块, 至少取标题
+  if (out.length === 0) {
+    const looseRe = /<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g
+    let m2: RegExpExecArray | null
+    while ((m2 = looseRe.exec(html)) !== null && out.length < max) {
+      const title = stripHtml(m2[2])
+      if (!title) continue
+      out.push({ title, url: m2[1], snippet: '' })
+    }
+  }
+  return out
+}
+
+async function searchSogou(q: string, max: number, timeoutMs: number): Promise<SearchResult[]> {
+  const url = 'https://www.sogou.com/web?query=' + encodeURIComponent(q)
+  const res = await fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'referer': 'https://www.sogou.com/',
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: 'follow',
+  })
+  const html = await res.text()
+  const out: SearchResult[] = []
+  // 搜狗: <div class="vrwrap"><h3 class="vr-title"><a href="...">标题</a> / <p class="str_info">摘要
+  const re = /<div class="vrwrap"[\s\S]*?<h3 class="vr-title"[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<p class="str_info"[^>]*>([\s\S]*?)<\/p>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html)) !== null && out.length < max) {
+    const title = stripHtml(m[2])
+    if (!title) continue
+    out.push({ title, url: m[1], snippet: stripHtml(m[3]).slice(0, 260) })
+  }
+  return out
+}
+
+/** Scrapling 优先通道: spawn Python 桥 (百度/搜狗/必应/DDG, 反爬稳) */
+const PY_PATHS = [
+  'C:/Users/Administrator/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe',
+  'C:/Users/Administrator/AppData/Local/hermes/hermes-agent/venv/python.exe',
+  'python',
+  'py',
+]
+
+function findPython(): string | null {
+  for (const p of PY_PATHS) {
+    if (p === 'python' || p === 'py') return p
+    if (existsSync(p)) return p
+  }
+  return null
+}
+
+function scraplingSearch(q: string, max: number, timeoutMs: number): SearchResult[] | null {
+  try {
+    const py = findPython()
+    if (!py) return null
+    const bridge = join(dirname(fileURLToPath(import.meta.url)), 'scrapling_search.py')
+    if (!existsSync(bridge)) return null
+    const r = spawnSync(py, [bridge, q, String(max)], {
+      encoding: 'utf8', timeout: timeoutMs + 5000, windowsHide: true, maxBuffer: 4 * 1024 * 1024,
+    })
+    if (r.status !== 0) return null
+    const out = JSON.parse(r.stdout.trim() || '[]')
+    if (!Array.isArray(out)) return null
+    return out.filter((x: any) => x && x.title).map((x: any) => ({
+      title: String(x.title).slice(0, 200),
+      url: String(x.url || ''),
+      snippet: String(x.snippet || '').slice(0, 260),
+    }))
+  } catch {
+    return null
+  }
+}
+
+async function searchOne(q: string, max: number, timeoutMs: number): Promise<{ q: string; results: SearchResult[]; error?: string; via?: string }> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  // ① 优先 Scrapling(Python桥)
+  const sp = scraplingSearch(q, max, timeoutMs)
+  if (sp && sp.length > 0) return { q, results: sp, via: 'scrapling' }
+  // ② 回退 Node fetch 多引擎轮询: Bing(主) → DDG → 搜狗 → Bing 重试
+  const attempt = async (engine: 'bing' | 'ddg' | 'sogou') => {
+    try {
+      if (engine === 'bing') return await searchBing(q, max, timeoutMs)
+      if (engine === 'ddg') return await searchDdg(q, max, timeoutMs)
+      return await searchSogou(q, max, timeoutMs)
+    } catch {
+      return [] as SearchResult[]
+    }
+  }
+  const engines: Array<'bing' | 'ddg' | 'sogou' | 'bing'> = ['bing', 'ddg', 'sogou', 'bing']
+  const waits = [0, 400, 700, 600]
+  for (let i = 0; i < engines.length; i++) {
+    if (waits[i]) await sleep(waits[i])
+    const r = await attempt(engines[i])
+    if (r.length > 0) return { q, results: r, via: engines[i] }
+  }
+  return { q, results: [], via: 'none' }
+}
+
+/** 无 LLM 关键词提取：补充词 + 地名/专名(不含"的") + 引号内容 + 高频专名字串 + 风格词; 主题头兜底 */
+function extractKeywords(story: string, extra?: string): string[] {
+  const kws = new Set<string>()
+  if (extra) {
+    for (const t of extra.split(/[;,，、;；\n]/)) {
+      const tt = t.trim()
+      if (tt.length >= 2 && tt.length <= 24) kws.add(tt)
+    }
+  }
+  // 地名/专名后缀词（匹配不含"的"的专名, 如 贞子岛/雾隐镇/城堡）
+  const suf = ['岛', '山', '城', '镇', '村', '寺', '宫', '殿', '园', '街', '巷', '堡', '谷', '河', '湖', '桥', '庄', '墓', '塔', '楼', '林', '洞', '湾', '坊', '庙', '寨', '港', '滩', '丘']
+  const placeRe = new RegExp('([\\u4e00-\\u9fa5]{1,6}?(?:' + suf.join('|') + '))', 'g')
+  let m: RegExpExecArray | null
+  while ((m = placeRe.exec(story)) !== null && kws.size < 24) {
+    const t = m[1]
+    if (t.length >= 2 && !/[的了和与在是被往向从至到把将的]/.test(t)) kws.add(t)
+  }
+  // 引号内容
+  const quoteRe = /[《「『"“]([^》」』"”]{2,16})[》」』"”]/g
+  while ((m = quoteRe.exec(story)) !== null) {
+    if (!/[的了和与在是被往向从至到把将的]/.test(m[1])) kws.add(m[1])
+  }
+  // 高频专名字串（2-4字 n-gram 计数, 低噪词加权; 抓"躲避球弹平"这类用户认识但模型不认识的语）
+  const noiseRe = /[的了和与在是被往向从至到把将也都很这那是有一他她它们而则且或但并又]/
+  const counts = new Map<string, number>()
+  const plain = story.replace(/[^\u4e00-\u9fa5A-Za-z]/g, ' ')
+  const words = plain.split(/\s+/).filter(Boolean)
+  for (const w of words) {
+    const len = w.length
+    const maxN = Math.min(4, len)
+    for (let n = 2; n <= maxN; n++) {
+      for (let i = 0; i + n <= len; i++) {
+        const sub = w.slice(i, i + n)
+        if (noiseRe.test(sub)) continue
+        counts.set(sub, (counts.get(sub) || 0) + 1)
+      }
+    }
+  }
+  // 排序: 频率降序, 长度优先(长的更可能是专名), 前6个
+  const frequent = [...counts.entries()]
+    .filter(([s, c]) => c >= 2 && s.length >= 2)
+    .sort((a, b) => (b[1] - a[1]) || (b[0].length - a[0].length))
+    .slice(0, 6)
+    .map(([s]) => s)
+  for (const s of frequent) kws.add(s)
+  // 风格类型词
+  for (const s of ['恐怖', '悬疑', '惊悚', '爱情', '奇幻', '科幻', '古装', '武侠', '仙侠', '都市', '校园', '治愈', '灾难', '末日', '穿越', '吸血鬼', '僵尸', '丧尸', '怪兽', '神仙', '妖怪', '民国', '赛博朋克']) {
+    if (story.includes(s)) kws.add(s)
+  }
+  // 兜底: 主题头(去掉动词介词后取核心, 仅当仍空)
+  if (kws.size === 0) {
+    const head = story.replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, '').slice(0, 14)
+    if (head.length >= 4) kws.add(head)
+  }
+  return [...kws]
+}
+
+export function apply(ctx: Context, config: Config): void {
+  const { searchTimeout = 15000, maxResults = 4, maxQueries = 5 } = config
+
+  // 单一技能工具：搜索资料 + 规范提示词 一次打包，对话模型直接分析打磨并六字段输出
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'yzh_h3_director_generate',
+    description: '妖猪猪H3连续剧情导演(单条流程): 自动联网检索角色/设定→打包生成要求+Picture放置规则+六字段规范→对话模型两轮打磨(首轮+审核二修)后严格输出官方六字段。只需提供剧情文本。',
+    parameters: {
+      story: { type: 'string', required: true, description: '你的剧情/故事(人物、场景、剧情梗概等, 越详细越好)' },
+      search_topics: { type: 'string', description: '可选补充搜索主题(分号分隔); 不填则由插件从剧情自动提取关键词' },
+      segments: { type: 'number', description: '可选指定Segment段数; 不填则由AI根据剧情自动决定' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { story: string; search_topics?: string; segments?: number }) {
+      const story = (args.story || '').trim()
+      if (!story) return '❌ 缺少 story 参数'
+      const segLine = args.segments && args.segments >= 1
+        ? `分段数量：严格采用 ${args.segments} 段（如若不完整则增加段数）。`
+        : '分段方式：AI自动分段（AI分析故事后自动分段，每段时长上限12秒，具体段数由AI根据整体剧情决定）。'
+
+      const kws = extractKeywords(story, args.search_topics).slice(0, maxQueries)
+      const searchParts: string[] = []
+      let viaSet = new Set<string>()
+      for (const q of kws) {
+        const { results, error, via } = await searchOne(q, maxResults, searchTimeout)
+        if (via) viaSet.add(via)
+        if (error) {
+          searchParts.push(`【关键词】${q}\n   检索失败: ${error}`)
+          continue
+        }
+        if (results.length === 0) {
+          searchParts.push(`【关键词】${q}\n   (无结果)`)
+          continue
+        }
+        const lines = results.map((r, i) => `   ${i + 1}. ${r.title}\n      URL: ${r.url}\n      摘要: ${r.snippet}`)
+        searchParts.push(`【关键词】${q}\n` + lines.join('\n'))
+      }
+      const viaNote = [...viaSet].length ? `\n(检索通道: ${[...viaSet].join(' + ')})\n` : ''
+      const searchBlock = searchParts.length
+        ? '\n\n【联网检索资料】（供你分析剧情、补充细节、查漏补缺，并非硬性要求）' + viaNote + '\n\n' + searchParts.join('\n\n')
+        : '\n\n【联网检索资料】\n(无检索结果——请以剧情原文与你的知识为准)\n'
+
+      return (
+        `# 任务：设计「连续剧情导演版」完整连续剧情，并严格按官方六字段输出。\n\n` +
+        `# 一、生成要求（必须严格遵守，优先级最高）\n` +
+        `- ${segLine}\n` +
+        (args.search_topics ? `- 补充搜索主题：${args.search_topics}\n` : '') +
+        `- 每个 Segment 最长不得超过 12 秒（duration ≤ 00:12.000），每段时间从 00:00.000 独立开始。\n` +
+        `- 公共人物绑定只出现一次：完整人物资产（脸型/五官/皮肤/发型/身材/服装/配饰）只在最上方「公共人物绑定:」区定义；后续 Segment 的 subject_definitions 禁止重抄人物完整外貌，只能引用 <Subject N>。\n` +
+        `- 人物绑定格式统一 <Subject N> 是<Picture N>同一位/同一头……；同一人物严禁拆成多个 Subject。\n` +
+        `- 【Picture 放置规则】公共人物绑定区：每个<Picture N>随对应人物绑定出现（<Subject N> 是<Picture N>……）。每个 Segment 的 subject_definitions 必须放置本段用到的场景/道具/参考图 <Picture N>（如 <Picture 3> 是本段场景参考……）；本段没用到的人物/场景 Picture 不要引用。Picture 编号整个项目全局连续，不因 Segment 重排。\n` +
+        `- 每个 Segment 的 subject_definitions 必须包含本段真正需要的：公共人物 <Subject N>、本段场景/道具 Picture、当前 <Audio N>（如实际提供）。\n` +
+        `- 导演台连续生成：不使用 <Video N>、不使用 [video continuation]；每个 Segment 一律 [reference generation]；从上一段最后一帧直接继续，禁止动作倒带、禁止恢复默认状态、禁止黑场/淡出（非最终段）、禁止无理由瞬移。\n` +
+        `- 字段标题严格用官方英文：subject_definitions: / summary: / retention_analysis: / detailed_description: / overall_soundscape: / non_diegetic_music:；技术标签保持英文（<Subject N>、<Picture N>、fully_preserved、[Shot N] At 00:00.000、[reference generation]、<d>[Chinese] ……</d>）。\n` +
+        `- 【语言策略】对白一律中文并用 <d>[中文]……</d> 包裹（英文对白仅当台词本身是英文时用 <d>[English]……</d>）。除对白外的其余正文（机位/镜头/位置/空间/动作/表演/光影/声音指导）**允许并推荐使用英文书写**——位置坐标、机位术语、镜头运动、肢体动作等英文描述精度更高；summary / retention_analysis / overall_soundscape / non_diegetic_music 可用英文或中文，但任何视觉空间与镜头细节必须用英文与罗盘词描述，禁止模糊方位词。\n` +
+        `- 【画面唯一性（硬性）】每个镜头（Shot）画面内，每个出场 <Subject N> 必须且只能出现一次；绝对禁止同一人物在同一画面中的双像/分身/镜像/复制渲染（无论正影倒影、远景近景同时出现）；同一人物在同一 Segment 内任何时刻只能处于一处，位置变化必须有 Movement Path 与物理过程，禁止瞬移（尤其禁止"黑场/切镜后人物凭空换位"）。若剧情需要"人物面对自己的倒影"，使用「旁观机位正拍 + 镜中人物单独入画、真实人物全部画外」实现。\n` +
+        `- 【对白格式（硬性）】所有人物对白必须以 <d>[中文]……</d> 标签包裹（英文对白用 <d>[English]……</d>）；任何人物的对白必须同时提供①说话人标识 <Subject N> (SN) ②英文声音表演指导（vocal direction：音量、音色、音域、节奏、气息、情绪语气、必须避免的念法，用完整英文描述句）③<d>标签内的中文对白原文。\n` +
+        `  正确范例：<Subject 1> (S1) 声音沉稳克制：and a slight chest undertone; low in volume, clearly articulated, cut in short phrases, with restrained impatience and pauses at sentence endings. Avoid a cute voice, domineering breathiness, announcer delivery, false maturity, or cartoon exaggeration. Do not play the line as narration: it is a controlled command directed at her. The volume dips slightly on“三个愿望” and the ending closes without a flourish.\n<d>[中文]女人，把领队带回家，可以实现你三个愿望。</d>\n  禁止把对白写成一串引号包裹的中文台词（如 女客"……"）；禁止把英文声音指导改成中文；禁止缺省 <d> 标签。\n` +
+        `- 对白只出现在 detailed_description 内；尽量给每个主要角色固定 Speaker ID（首现即标注 <Subject N> (SN)），后续一致。\n` +
+        `- 字段名不得翻译/改写，字段顺序不得改变；不得伪造 <Picture N>（场景无参考图时自然语言描述）。\n` +
+        `- 非最终 Segment 必须留下清晰动作接口帧（运动矢量+朝向+道具位置），最终段才允许完整收束。\n` +
+        `- 【稳定复现·绝对空间】全片必须建立两份一次性公共资产：①【世界坐标系】——以"东西南北罗盘 + 房间固定锚点(A/B/C…)"定义场景四向布局与关键位置，全片不变量；②【机位登记表】——为每个用过的机位命名（CAM-A/B/C…），写清绝对位置、朝向、高度、俯仰与默认景别，后续镜头只引用名字。所有方位描述只用罗盘词，禁止"前方/后方/左边/旁边/一侧/前面"等无参照词。\n` +
+        `- 【稳定复现·开局占位】每个非首 Segment 的 subject_definitions 必须输出【开局占位核对】：人物身体轴向（头朝x、脚朝y）、体位（仰/俯/站/坐）、方位角、左右手状态、道具位置——逐项声明与上一段出口帧完全一致；人物占位只允许剧情明文规定的变化。\n` +
+        `- 【稳定复现·肢体纪律】在公共人物绑定区为每个角色建立手部职责表（如 江宴辞：左手=腕表手·唯一触碰、右手=平板手·全程持物），全片锁定：禁止换手、禁止新增第三只手、禁止"一只手干两件事"；每帧画面内的手必须能指认到职责表；特写镜头必须限制画面内肢体件数（明确列出允许出现的肢体件，其余声明"在画面外，禁止入画"）。\n` +
+        `- 【稳定复现·禁用镜面反射】禁止实体镜子/玻璃/水面等反射面与倒影入画——反射会把肢体复制（出现"三只手"）；文学上的"镜中"视角用「旁观机位正拍+对称构图」替代实现。若剧情硬性必须用镜：只允许单镜头纯反射视角（真实空间人物全部在画外），"真实+反射"同框严格禁止。\n` +
+        `- 【稳定复现·微动作禁位移（防贴墙瞬移）】人物的"看/侧头/闭眼/松手/抬眉"等微动作绝对禁止伴随任何身体位移（起身/转身/平移/靠近边界）；禁止人物靠近、贴靠或朝向墙/窗/镜等环境边界的构图与视线；窗只作为光源出现（斜射光斑），禁止"走向窗边/看向窗外"类指示。光源方向务必与人物脸部朝向自洽：顺光=光从镜头方向来、逆光=光从人物背后方向来、侧光=光从一侧来——同一镜头只写一种，禁止自相矛盾（矛盾会诱发模型把人物挪向光源，造成瞬移）。\n\n` +
+        `# 二、剧情输入（用户提供）\n\n${story}\n\n` +
+        searchBlock +
+        `\n\n# 三、工作流（必须两轮完成）\n` +
+        `第一轮：结合上述要求与检索资料，设计完整连续剧情并输出全部 Segment 的官方六字段（含公共人物绑定区）。\n` +
+        `审核轮（重点检查设计合理性，逐项核对）：\n` +
+        `① 人物动作：动作是否有物理过程（起始状态→动作发生→动作结果）、是否完成全程、有无"没拿起突然已在嘴边"式跳跃、有无动作倒带/重复执行上一段已完成动作。\n` +
+        `② 位置：人物真实世界位置（靠 A/B/C 空间锚点描述）、进出前后是否一致、有无瞬移、人物与道具/场景距离关系是否合理。\n` +
+        `③ 镜头：机位是否从上一段机位接力（开头约 0.5–2 秒延续原机位再切换）、Camera Vector 是否与 Character Movement Vector 分离、镜头有没有改变人物真实路径、切点是否在动作进行中。\n` +
+        `④ 物理：重心、蹬地方向、朝向角、转身支点（如以左脚为支点旋转约180°）、水渍/破损/妆发等状态是否符合前一帧、重力与时间的物理连续性。\n` +
+        `⑤ 其余：再对照「四、六字段格式规范」第五十九节《输出前内部连续性检查》37 项逐项自查（人物资产/时长/首尾接口/状态/空间/场景/声音），并核对格式是否全部符合上述生成要求。\n` +
+        `⑥ 肢体：每拍画面的手/腿数量是否可指认到手部职责表；有无第三只手、多余肢体或反射复制（三只手）；特写是否声明了肢体件数上限。\n` +
+        `⑦ 位置细节：微动作是否伴随位移；人物有无贴靠墙/窗/镜边界；"看/侧头"指示与光源描述是否自洽（顺光/逆光矛盾会诱发瞬移）；机位是否只引用登记表命名并完成 0.5–2 秒接力。\n` +
+        `⑧ 对白格式：每句人物对白是否都是「<Subject N> (SN) + 英文声音表演指导 + <d>[中文]……</d>」结构；有无把对白写成中文引号串；Speaker ID 是否全程一致；英文指导是否完整可用（音量/音色/节奏/情绪/避免事项）。\n` +
+        `⑨ 画面唯一性：每个镜头画面内每个人物是否只出现一次、同一人物有无双像/分身/镜像/复制渲染；同一人物在同一 Segment 内是否始终处于一处、有无瞬移（切镜/黑场后位置变化）；倒影场景是否符合"真实人物画外"规则；位置变化是否都有 Movement Path 支撑。\n` +
+        `发现任何冲突（如 12 秒超时、Picture 遗漏、字段名松动、动作倒带、位置瞬移、镜头跳切、物理不合理、恢复默认状态、对白缺失<d>标签、同人物分身/双像/瞬移），必须先自行重新设计对应 Segment，再输出。\n` +
+        `二修轮：修正全部问题后，输出最终版本——只呈现一次完整设计（公共人物绑定: + 各 [Segment N | duration 00:XX.XXX] 六字段），不再保留初审痕迹或检查过程。\n\n` +
+        `# 四、六字段格式规范（完整提示词，必须严格遵照）\n\n${H3_PROMPT}`
+      )
+    },
+  })), '@dsh-external/yzh-h3-director: generate tool')
+
+  // 前端工作流: 网络小说章节 → 影视分镜(4.0提示词) → 输出内容可直接投喂 generate
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'yzh_novel_storyboard',
+    description: '网络小说章节影视化/分镜/视频提示词生成(4.0): 粘贴一整章小说, 先按影视分镜4.0规范改编为场景+Beat+Segment+专业分镜+【AI视频剧情提示词】, 结果可直接作为 story 投喂 yzh_h3_director_generate 生成官方六字段连续剧情。',
+    parameters: {
+      novel_chapter: { type: 'string', required: true, description: '网络小说一整章原文(章节名+正文)' },
+      preserve_dialog: { type: 'boolean', description: '默认false; true=原台词逐字保留不改' },
+      target_seconds: { type: 'number', description: '可选每Segment目标秒数(10-15, 默认13)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { novel_chapter: string; preserve_dialog?: boolean; target_seconds?: number }) {
+      const chapter = (args.novel_chapter || '').trim()
+      if (!chapter) return '❌ 缺少 novel_chapter 参数'
+      const secs = Math.min(15, Math.max(10, args.target_seconds || 13))
+      const preserveLine = args.preserve_dialog
+        ? '- 原台词逐字保留（用户要求"原台词绝对不改"），不得修改任何原对白核心意思。\n'
+        : '- 原台词核心意思不可改；可做极轻微口语化整理（不改意思/人物关系/态度/信息）。\n'
+      return (
+        `# 任务：将以下网络小说章节影视化改编为专业分镜与视频生成提示词。\n\n` +
+        `# 一、生成要求（必须严格遵守，优先级最高）\n` +
+        `- ${preserveLine}` +
+        `- 每个 Segment 预估时长约 ${secs} 秒（可将 Beat 转 Segment; 内容不足可用表演停顿/视线/动作过程自然延展, 禁止无意义凑时长）。\n` +
+        `- 忠于原著：禁止改变事件结果/人物关系/性格/谁说了什么/关键道具/生死/顺序/新增关键角色或剧情；可补充合理影视化动作。\n` +
+        `- 心理活动优先视觉化（表情/眼神/停顿/呼吸/动作/POV/反应镜头），仅在无法自然表达且必要时才用【OS】；作者叙述不得机械变旁白。\n` +
+        `- 每次切镜必须有导演理由（15 种功能之一）；禁止说话人→听者→手特写→道具特写固定套路；禁止为景别丰富破坏表演。\n` +
+        `- 镜头设计需给景别/机位/镜头运动/构图/时长；动作无法在当前时间完成必须拆镜。\n` +
+        `- 空间铁律：每个场景建立空间锚点（人物位置/道具/门窗/朝向/运动方向），遵守180度轴线与视线匹配。\n` +
+        `- 跨 Segment 连续性：上一 Segment 最后镜头的结束状态 = 下一 Segment 起始状态，禁止无过程跳跃/瞬移。\n` +
+        `- 每段都要输出【AI视频剧情提示词】（连续的计事时间线描述: 环境/位置/动作/表情/互动/顺序/节奏/对白/结尾状态），禁止关键词堆砌。\n` +
+        `- 输出完整结构：章节摘要 → 【场景01】(场景信息/空间锚点/剧情目标) → 【Segment 01-01】(剧情内容/初始状态/分镜镜头逐个: 景别机位运动/时长/画面/动作/表演/对白OS/镜头目的/Segment结束状态/AI视频剧情提示词) → 依次到整章结束；最后自查二十二节(剧情/人物/连续性/分镜/时长)。\n\n` +
+        `# 二、小说章节原文（用户提供）\n\n${chapter}\n\n` +
+        `# 三、影视分镜生成系统提示词 4.0（完整规范，必须严格遵照）\n\n${NOVEL_PROMPT}`
+      )
+    },
+  })), '@dsh-external/yzh-h3-director: novel storyboard tool')
+}
