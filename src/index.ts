@@ -18,6 +18,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { H3_PROMPT } from './prompt.js'
+import { NOVEL_PROMPT } from './novel_prompt.js'
 
 export const name = "@dsh-external/yzh-h3-director"
 export const inject = ['tools']
@@ -320,7 +321,12 @@ export function apply(ctx: Context, config: Config): void {
         `- 导演台连续生成：不使用 <Video N>、不使用 [video continuation]；每个 Segment 一律 [reference generation]；从上一段最后一帧直接继续，禁止动作倒带、禁止恢复默认状态、禁止黑场/淡出（非最终段）、禁止无理由瞬移。\n` +
         `- 字段标题严格用官方英文：subject_definitions: / summary: / retention_analysis: / detailed_description: / overall_soundscape: / non_diegetic_music:；正文用简体中文；技术标签保持英文（<Subject N>、<Picture N>、fully_preserved、[Shot N] At 00:00.000、[reference generation]、<d>[Chinese] ……</d>）。\n` +
         `- 字段名不得翻译/改写，字段顺序不得改变；不得伪造 <Picture N>（场景无参考图时自然语言描述）。\n` +
-        `- 非最终 Segment 必须留下清晰动作接口帧（运动矢量+朝向+道具位置），最终段才允许完整收束。\n\n` +
+        `- 非最终 Segment 必须留下清晰动作接口帧（运动矢量+朝向+道具位置），最终段才允许完整收束。\n` +
+        `- 【稳定复现·绝对空间】全片必须建立两份一次性公共资产：①【世界坐标系】——以"东西南北罗盘 + 房间固定锚点(A/B/C…)"定义场景四向布局与关键位置，全片不变量；②【机位登记表】——为每个用过的机位命名（CAM-A/B/C…），写清绝对位置、朝向、高度、俯仰与默认景别，后续镜头只引用名字。所有方位描述只用罗盘词，禁止"前方/后方/左边/旁边/一侧/前面"等无参照词。\n` +
+        `- 【稳定复现·开局占位】每个非首 Segment 的 subject_definitions 必须输出【开局占位核对】：人物身体轴向（头朝x、脚朝y）、体位（仰/俯/站/坐）、方位角、左右手状态、道具位置——逐项声明与上一段出口帧完全一致；人物占位只允许剧情明文规定的变化。\n` +
+        `- 【稳定复现·肢体纪律】在公共人物绑定区为每个角色建立手部职责表（如 江宴辞：左手=腕表手·唯一触碰、右手=平板手·全程持物），全片锁定：禁止换手、禁止新增第三只手、禁止"一只手干两件事"；每帧画面内的手必须能指认到职责表；特写镜头必须限制画面内肢体件数（明确列出允许出现的肢体件，其余声明"在画面外，禁止入画"）。\n` +
+        `- 【稳定复现·禁用镜面反射】禁止实体镜子/玻璃/水面等反射面与倒影入画——反射会把肢体复制（出现"三只手"）；文学上的"镜中"视角用「旁观机位正拍+对称构图」替代实现。若剧情硬性必须用镜：只允许单镜头纯反射视角（真实空间人物全部在画外），"真实+反射"同框严格禁止。\n` +
+        `- 【稳定复现·微动作禁位移（防贴墙瞬移）】人物的"看/侧头/闭眼/松手/抬眉"等微动作绝对禁止伴随任何身体位移（起身/转身/平移/靠近边界）；禁止人物靠近、贴靠或朝向墙/窗/镜等环境边界的构图与视线；窗只作为光源出现（斜射光斑），禁止"走向窗边/看向窗外"类指示。光源方向务必与人物脸部朝向自洽：顺光=光从镜头方向来、逆光=光从人物背后方向来、侧光=光从一侧来——同一镜头只写一种，禁止自相矛盾（矛盾会诱发模型把人物挪向光源，造成瞬移）。\n\n` +
         `# 二、剧情输入（用户提供）\n\n${story}\n\n` +
         searchBlock +
         `\n\n# 三、工作流（必须两轮完成）\n` +
@@ -331,10 +337,51 @@ export function apply(ctx: Context, config: Config): void {
         `③ 镜头：机位是否从上一段机位接力（开头约 0.5–2 秒延续原机位再切换）、Camera Vector 是否与 Character Movement Vector 分离、镜头有没有改变人物真实路径、切点是否在动作进行中。\n` +
         `④ 物理：重心、蹬地方向、朝向角、转身支点（如以左脚为支点旋转约180°）、水渍/破损/妆发等状态是否符合前一帧、重力与时间的物理连续性。\n` +
         `⑤ 其余：再对照「四、六字段格式规范」第五十九节《输出前内部连续性检查》37 项逐项自查（人物资产/时长/首尾接口/状态/空间/场景/声音），并核对格式是否全部符合上述生成要求。\n` +
+        `⑥ 肢体：每拍画面的手/腿数量是否可指认到手部职责表；有无第三只手、多余肢体或反射复制（三只手）；特写是否声明了肢体件数上限。\n` +
+        `⑦ 位置细节：微动作是否伴随位移；人物有无贴靠墙/窗/镜边界；"看/侧头"指示与光源描述是否自洽（顺光/逆光矛盾会诱发瞬移）；机位是否只引用登记表命名并完成 0.5–2 秒接力。\n` +
         `发现任何冲突（如 12 秒超时、Picture 遗漏、字段名松动、动作倒带、位置瞬移、镜头跳切、物理不合理、恢复默认状态），必须先自行重新设计对应 Segment，再输出。\n` +
         `二修轮：修正全部问题后，输出最终版本——只呈现一次完整设计（公共人物绑定: + 各 [Segment N | duration 00:XX.XXX] 六字段），不再保留初审痕迹或检查过程。\n\n` +
         `# 四、六字段格式规范（完整提示词，必须严格遵照）\n\n${H3_PROMPT}`
       )
     },
   })), '@dsh-external/yzh-h3-director: generate tool')
+
+  // 前端工作流: 网络小说章节 → 影视分镜(4.0提示词) → 输出内容可直接投喂 generate
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'yzh_novel_storyboard',
+    description: '网络小说章节影视化/分镜/视频提示词生成(4.0): 粘贴一整章小说, 先按影视分镜4.0规范改编为场景+Beat+Segment+专业分镜+【AI视频剧情提示词】, 结果可直接作为 story 投喂 yzh_h3_director_generate 生成官方六字段连续剧情。',
+    parameters: {
+      novel_chapter: { type: 'string', required: true, description: '网络小说一整章原文(章节名+正文)' },
+      preserve_dialog: { type: 'boolean', description: '默认false; true=原台词逐字保留不改' },
+      target_seconds: { type: 'number', description: '可选每Segment目标秒数(10-15, 默认13)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args: { novel_chapter: string; preserve_dialog?: boolean; target_seconds?: number }) {
+      const chapter = (args.novel_chapter || '').trim()
+      if (!chapter) return '❌ 缺少 novel_chapter 参数'
+      const secs = Math.min(15, Math.max(10, args.target_seconds || 13))
+      const preserveLine = args.preserve_dialog
+        ? '- 原台词逐字保留（用户要求"原台词绝对不改"），不得修改任何原对白核心意思。\n'
+        : '- 原台词核心意思不可改；可做极轻微口语化整理（不改意思/人物关系/态度/信息）。\n'
+      return (
+        `# 任务：将以下网络小说章节影视化改编为专业分镜与视频生成提示词。\n\n` +
+        `# 一、生成要求（必须严格遵守，优先级最高）\n` +
+        `- ${preserveLine}` +
+        `- 每个 Segment 预估时长约 ${secs} 秒（可将 Beat 转 Segment; 内容不足可用表演停顿/视线/动作过程自然延展, 禁止无意义凑时长）。\n` +
+        `- 忠于原著：禁止改变事件结果/人物关系/性格/谁说了什么/关键道具/生死/顺序/新增关键角色或剧情；可补充合理影视化动作。\n` +
+        `- 心理活动优先视觉化（表情/眼神/停顿/呼吸/动作/POV/反应镜头），仅在无法自然表达且必要时才用【OS】；作者叙述不得机械变旁白。\n` +
+        `- 每次切镜必须有导演理由（15 种功能之一）；禁止说话人→听者→手特写→道具特写固定套路；禁止为景别丰富破坏表演。\n` +
+        `- 镜头设计需给景别/机位/镜头运动/构图/时长；动作无法在当前时间完成必须拆镜。\n` +
+        `- 空间铁律：每个场景建立空间锚点（人物位置/道具/门窗/朝向/运动方向），遵守180度轴线与视线匹配。\n` +
+        `- 跨 Segment 连续性：上一 Segment 最后镜头的结束状态 = 下一 Segment 起始状态，禁止无过程跳跃/瞬移。\n` +
+        `- 每段都要输出【AI视频剧情提示词】（连续的计事时间线描述: 环境/位置/动作/表情/互动/顺序/节奏/对白/结尾状态），禁止关键词堆砌。\n` +
+        `- 输出完整结构：章节摘要 → 【场景01】(场景信息/空间锚点/剧情目标) → 【Segment 01-01】(剧情内容/初始状态/分镜镜头逐个: 景别机位运动/时长/画面/动作/表演/对白OS/镜头目的/Segment结束状态/AI视频剧情提示词) → 依次到整章结束；最后自查二十二节(剧情/人物/连续性/分镜/时长)。\n\n` +
+        `# 二、小说章节原文（用户提供）\n\n${chapter}\n\n` +
+        `# 三、影视分镜生成系统提示词 4.0（完整规范，必须严格遵照）\n\n${NOVEL_PROMPT}`
+      )
+    },
+  })), '@dsh-external/yzh-h3-director: novel storyboard tool')
 }
